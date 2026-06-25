@@ -1,0 +1,40 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+
+# Python
+__pycache__/
+.py[cod]
+.pyo
+.pyd
+
+# Virtual Environment
+venv/
+.venv/
+
+# Environment Variables
+.env
+
+# Streamlit Cache
+.streamlit/
+
+# ChromaDB
+chroma_db/
+
+# Uploaded PDFs
+uploads/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+.log
+
+# Pytest
+.pytest_cache/
+
+# Build
+build/
+dist/
+.egg-info/
