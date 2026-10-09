@@ -4,7 +4,7 @@ A Retrieval-Augmented Generation (RAG) application that allows users to upload P
 
 ## 🚀 Live Demo
 
-**Render:** https://rag-pdf-question-answering-u9zf.onrender.com/?embed=true
+**Streamlit:** (https://rag-pdf-question-answering-cq45dapdukcz3fme8fodnw.streamlit.app/)
 
 ## 📌 Features
 
@@ -79,8 +79,7 @@ streamlit run streamlit_app.py
 7. Groq Llama 3.3 generates an answer using the retrieved context.
 
 ## 📸 Live Application
-
-https://rag-pdf-question-answering-u9zf.onrender.com/?embed=true
+(https://rag-pdf-question-answering-cq45dapdukcz3fme8fodnw.streamlit.app/)
 
 ## 👨‍💻 Author
 
