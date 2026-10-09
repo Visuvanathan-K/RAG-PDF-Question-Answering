@@ -1,127 +1,155 @@
-import asyncio
+
+import os
+import hashlib
+import tempfile
 from pathlib import Path
-import time
 
 import streamlit as st
-import inngest
 from dotenv import load_dotenv
-import os
-import requests
+from groq import Groq
+
+from data_loader import load_and_chunk_pdf, embed_texts
+from vector_db import ChromaStorage
 
 load_dotenv()
 
-st.set_page_config(page_title="RAG Ingest PDF", page_icon="📄", layout="centered")
+st.set_page_config(
+    page_title="RAG PDF Question Answering",
+    page_icon="📄",
+    layout="centered",
+)
 
+st.title("📄 RAG PDF Question Answering")
+st.write("Upload a PDF and ask questions about its content.")
 
 @st.cache_resource
-def get_inngest_client() -> inngest.Inngest:
-    return inngest.Inngest(app_id="rag_app", is_production=False)
+def get_vector_store():
+    return ChromaStorage(collection="demo_docs")
 
+@st.cache_resource
+def get_groq_client():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is not configured.")
+    return Groq(api_key=api_key)
 
-def save_uploaded_pdf(file) -> Path:
-    uploads_dir = Path("uploads")
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    file_path = uploads_dir / file.name
-    file_bytes = file.getbuffer()
-    file_path.write_bytes(file_bytes)
-    return file_path
+if "source_id" not in st.session_state:
+    st.session_state.source_id = None
 
-
-async def send_rag_ingest_event(pdf_path: Path) -> None:
-    client = get_inngest_client()
-    await client.send(
-        inngest.Event(
-            name="rag/ingest_pdf",
-            data={
-                "pdf_path": str(pdf_path.resolve()),
-                "source_id": pdf_path.name,
-            },
-        )
-    )
-
-
-st.title("Upload a PDF to Ingest")
-uploaded = st.file_uploader("Choose a PDF", type=["pdf"], accept_multiple_files=False)
+uploaded = st.file_uploader("Choose a PDF", type=["pdf"])
 
 if uploaded is not None:
-    with st.spinner("Uploading and triggering ingestion..."):
-        path = save_uploaded_pdf(uploaded)
-        # Kick off the event and block until the send completes
-        asyncio.run(send_rag_ingest_event(path))
-        # Small pause for user feedback continuity
-        time.sleep(0.3)
-    st.success(f"Triggered ingestion for: {path.name}")
-    st.caption("You can upload another PDF if you like.")
+    file_hash = hashlib.sha256(uploaded.getvalue()).hexdigest()
 
+    if st.session_state.source_id != file_hash:
+        if st.button("Process PDF"):
+            temp_path = None
+            try:
+                with st.spinner("Extracting text and indexing PDF..."):
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".pdf", delete=False
+                    ) as temp_file:
+                        temp_file.write(uploaded.getvalue())
+                        temp_path = temp_file.name
 
+                    chunks = load_and_chunk_pdf(temp_path)
+
+                    if not chunks:
+                        st.error("No extractable text was found in this PDF.")
+                    else:
+                        embeddings = embed_texts(chunks)
+                        ids = [
+                            hashlib.sha256(
+                                f"{file_hash}:{i}".encode()
+                            ).hexdigest()
+                            for i in range(len(chunks))
+                        ]
+                        payloads = [
+                            {
+                                "source": uploaded.name,
+                                "text": chunk,
+                                "document_id": file_hash,
+                            }
+                            for chunk in chunks
+                        ]
+
+                        get_vector_store().upsert(ids, embeddings, payloads)
+                        st.session_state.source_id = file_hash
+                        st.session_state.source_name = uploaded.name
+                        st.success(
+                            f"Processed {uploaded.name}: {len(chunks)} chunks indexed."
+                        )
+            except Exception as exc:
+                st.error(f"PDF processing failed: {exc}")
+            finally:
+                if temp_path and Path(temp_path).exists():
+                    Path(temp_path).unlink()
+
+    else:
+        st.success(f"PDF ready: {uploaded.name}")
 
 st.divider()
-st.title("Ask a question about your PDFs")
+st.subheader("Ask a question")
 
-
-async def send_rag_query_event(question: str, top_k: int) -> None:
-    client = get_inngest_client()
-    result = await client.send(
-        inngest.Event(
-            name="rag/query_pdf_ai",
-            data={
-                "question": question,
-                "top_k": top_k,
-            },
-        )
-    )
-    
-    return result[0]
-
-
-def _inngest_api_base() -> str:
-    # Local dev server default; configurable via env
-    return os.getenv("INNGEST_API_BASE", "http://127.0.0.1:8288/v1")
-
-
-def fetch_runs(event_id: str) -> list[dict]:
-    url = f"{_inngest_api_base()}/events/{event_id}/runs"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("data", [])
-
-
-def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s: float = 0.5) -> dict:
-    start = time.time()
-    last_status = None
-    while True:
-        runs = fetch_runs(event_id)
-        if runs:
-            run = runs[0]
-            status = run.get("status")
-            last_status = status or last_status
-            if status in ("Completed", "Succeeded", "Success", "Finished"):
-                return run.get("output") or {}
-            if status in ("Failed", "Cancelled"):
-                raise RuntimeError(f"Function run {status}")
-        if time.time() - start > timeout_s:
-            raise TimeoutError(f"Timed out waiting for run output (last status: {last_status})")
-        time.sleep(poll_interval_s)
-
-
-with st.form("rag_query_form"):
+with st.form("question_form"):
     question = st.text_input("Your question")
-    top_k = st.number_input("How many chunks to retrieve", min_value=1, max_value=20, value=5, step=1)
+    top_k = st.number_input(
+        "Chunks to retrieve", min_value=1, max_value=10, value=5
+    )
     submitted = st.form_submit_button("Ask")
 
-    if submitted and question.strip():
-        with st.spinner("Sending event and generating answer..."):
-            # Fire-and-forget event to Inngest for observability/workflow
-            event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k)))
-            # Poll the local Inngest API for the run's output
-            output = wait_for_run_output(event_id)
-            answer = output.get("answer", "")
-            sources = output.get("sources", [])
-  
-        st.subheader("Answer")
-        st.write(answer or "(No answer)")
-        if sources:
-            st.caption("Sources")
-            for s in sources:
-                st.write(f"- {s}")
+if submitted:
+    if not question.strip():
+        st.warning("Enter a question.")
+    elif not st.session_state.source_id:
+        st.warning("Upload and process a PDF first.")
+    else:
+        try:
+            with st.spinner("Searching the PDF and generating an answer..."):
+                query_embedding = embed_texts([question.strip()])[0]
+
+                results = get_vector_store().collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=int(top_k),
+                    where={"document_id": st.session_state.source_id},
+                )
+
+                contexts = results.get("documents", [[]])[0]
+                sources = results.get("metadatas", [[]])[0]
+
+                if not contexts:
+                    st.warning("No relevant text was found in this PDF.")
+                else:
+                    context_block = "\n\n".join(contexts)
+
+                    response = get_groq_client().chat.completions.create(
+                        model="openai/gpt-oss-120b",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Answer using only the supplied PDF context. "
+                                    "If the answer is not present, say so. "
+                                    "Do not invent facts."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"PDF context:\n{context_block}\n\n"
+                                    f"Question: {question.strip()}"
+                                ),
+                            },
+                        ],
+                        max_tokens=1024,
+                    )
+
+                    st.subheader("Answer")
+                    st.write(response.choices[0].message.content)
+
+                    st.caption("Source")
+                    for metadata in sources:
+                        st.write(f"- {metadata.get('source', 'Uploaded PDF')}")
+
+        except Exception as exc:
+            st.error(f"Question answering failed: {exc}")
